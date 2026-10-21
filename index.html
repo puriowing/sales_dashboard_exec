@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>売上管理ダッシュボード v18【経営陣版】</title>
+    <title>売上管理ダッシュボード v19【経営陣版】</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin="anonymous"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
@@ -3468,7 +3468,660 @@
             );
         }
 
-        const navItems = [{ id: 'dashboard', label: '全社', icon: 'Dashboard' }, { id: 'weekly', label: '週次', icon: 'Calendar' }, { id: 'forecast', label: '見込', icon: 'TrendingUp' }, { id: 'division', label: '事業部', icon: 'Layout' }, { id: 'clients', label: '顧客', icon: 'Users' }, { id: 'works', label: '作品', icon: 'Film' }, { id: 'jobs', label: '職種', icon: 'BarChart' }, { id: 'expenses', label: '販管費', icon: 'CreditCard' }, { id: 'projects', label: '案件管理', icon: 'Briefcase' }, { id: 'history', label: '過去実績', icon: 'History' }, { id: 'report', label: '出力', icon: 'FileText' }];
+        // --- 経営会議ビュー（毎週見る4ページ） ---
+        const MK = {
+            PAGES: [
+                { id: 'mk_month', n: 1, label: '今月の粗利', q: '単月の粗利は予算・昨年と比べてどうか。先週から何が増えたか' },
+                { id: 'mk_outlook', n: 2, label: '年間の見通し', q: 'いまのペースで、粗利・販管費・営業利益が年間の予算に届くか' },
+                { id: 'mk_works', n: 3, label: '注目の作品・案件', q: '大きな粗利が出た作品・案件はどれか' },
+                { id: 'mk_exp', n: 4, label: '販管費', q: '予算を超えている科目はどこか' }
+            ],
+            DIVS: ['第1', '第2', '第3'],
+            DIV_COLOR: { '第1': '#3b82f6', '第2': '#10b981', '第3': '#f59e0b', 'その他': '#94a3b8' },
+            TONE: {
+                good: { bg: 'bg-emerald-50', bd: 'border-emerald-300', fg: 'text-emerald-700', num: 'text-emerald-600' },
+                warn: { bg: 'bg-amber-50', bd: 'border-amber-300', fg: 'text-amber-700', num: 'text-amber-600' },
+                bad: { bg: 'bg-red-50', bd: 'border-red-300', fg: 'text-red-700', num: 'text-red-600' },
+                gray: { bg: 'bg-slate-50', bd: 'border-slate-300', fg: 'text-slate-600', num: 'text-gray-800' }
+            },
+            BASES: [{ v: 7, l: '1週間前（前回の会議）' }, { v: 14, l: '2週間前' }, { v: 28, l: '4週間前' }],
+            sum: (a) => (a || []).reduce((s, v) => s + (Number(v) || 0), 0),
+            divOf: (p) => { const s = String((p && p.div) || ''); if (s.includes('1')) return '第1'; if (s.includes('2')) return '第2'; if (s.includes('3')) return '第3'; return 'その他'; },
+            day0: (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()),
+            baseDate: (days) => { const d = MK.day0(new Date()); d.setDate(d.getDate() - days); return d; },
+            md: (d) => `${d.getMonth() + 1}/${d.getDate()}`,
+            regTime: (p) => { const d = Utils.parseDate(String((p && p.regDate) || '').trim().substring(0, 10)); return d.getFullYear() < 2000 ? null : MK.day0(d).getTime(); },
+            isFresh: (p, baseT) => { const t = MK.regTime(p); return t != null && t > baseT; },
+            pct: (a, b) => b > 0 ? Math.round(a / b * 100) + '%' : '—',
+            short: (s, n = 16) => { const t = String(s || ''); return t.length > n ? t.slice(0, n) + '…' : t; },
+            cname: (s) => String(s || '不明').normalize('NFKC').replace(/株式会社|\(株\)|（株）|\s/g, '') || '不明',
+            curIdx: (period) => { const t = new Date(); return Math.max(0, Math.min(11, t.getFullYear() * 12 + t.getMonth() - FC.periodStartKey(period))); },
+            kArr: (arr) => Array.from({ length: 12 }, (_, i) => (Number((arr || [])[i]) || 0) * 1000),
+            workName: (p, master) => (master && p.managerId && master[p.managerId]) || p.title || '名称不明',
+            // 作品（管理番号）単位にまとめる。管理番号がない案件は案件名でまとめる
+            group: (list, master) => {
+                const m = {};
+                (list || []).forEach(p => {
+                    const key = p.managerId ? 'w:' + p.managerId : 't:' + (p.title || '');
+                    const g = m[key] || (m[key] = { key, id: p.managerId || '', name: MK.workName(p, master), profit: 0, sales: 0, count: 0, items: [], divs: {}, clients: {} });
+                    g.profit += p.profit || 0; g.sales += p.sales || 0; g.count++; g.items.push(p);
+                    const dv = MK.divOf(p); g.divs[dv] = (g.divs[dv] || 0) + (p.profit || 0);
+                    const c = p.client || '不明'; g.clients[c] = (g.clients[c] || 0) + (p.profit || 0);
+                });
+                return Object.values(m).map(g => ({ ...g, div: Object.entries(g.divs).sort((a, b) => b[1] - a[1])[0][0], client: Object.entries(g.clients).sort((a, b) => b[1] - a[1])[0][0], top: g.items.slice().sort((a, b) => b.profit - a.profit)[0] }));
+            },
+            rng: (seed) => () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; },
+            // 締めた月の予算達成率から、残りの月を見込む。達成確率は達成率のばらつきを使った試算
+            outlook: (A, B, curIdx, opt) => {
+                const S = MK.sum, o = opt || {};
+                const budgetFY = o.budgetFY != null ? o.budgetFY : S(B), closedA = S(A.slice(0, curIdx)), closedB = S(B.slice(0, curIdx));
+                const ratios = []; for (let m = 0; m < curIdx; m++) if (B[m] > 0) ratios.push(A[m] / B[m]);
+                const rbar = closedB > 0 ? closedA / closedB : null;
+                const remB = S(B.slice(curIdx));
+                const proj = A.map((a, m) => m < curIdx ? a : Math.max(a || 0, rbar != null ? B[m] * rbar : 0));
+                const landing = S(proj);
+                const booked = S(A.slice(curIdx));
+                const need = budgetFY - closedA;
+                const needRatio = remB > 0 ? need / remB : null;
+                let prob = null, p10 = null, p90 = null, sims = null;
+                if (ratios.length >= 3 && budgetFY > 0) {
+                    const rnd = MK.rng(o.seed || 20261021), N = MK.SIMS, out = [];
+                    const pick = () => ratios[Math.floor(rnd() * ratios.length)];
+                    for (let k = 0; k < N; k++) {
+                        const c = pick(); let t = closedA;
+                        for (let m = curIdx; m < 12; m++) t += Math.max(A[m] || 0, B[m] * (0.5 * c + 0.5 * pick()));
+                        out.push(t);
+                    }
+                    sims = out.slice();
+                    out.sort((x, y) => x - y);
+                    prob = out.filter(v => v >= budgetFY).length / N;
+                    p10 = out[Math.floor(N * 0.1)]; p90 = out[Math.floor(N * 0.9)];
+                }
+                const mean = ratios.length ? S(ratios) / ratios.length : null;
+                const sd = ratios.length > 1 ? Math.sqrt(S(ratios.map(r => (r - mean) * (r - mean))) / (ratios.length - 1)) : null;
+                return { budgetFY, closedA, closedB, ratios, rbar, mean, sd, remB, proj, landing, booked, need, needRatio, prob, p10, p90, sims, remN: 12 - curIdx };
+            },
+            SIMS: 4000,
+            // 販管費：経営陣用の予実表があれば科目合計、なければ予算実績リストの全社販管費。予備費は今後使わない前提で見込から外す
+            expSeries: (execPL, execItems, monthlyData) => {
+                if (execPL) {
+                    const md = EXP.build(execPL, execItems, -1);
+                    const S = MK.sum, live = md.accounts;
+                    const B = EXP.FY.map((_, m) => S(live.map(a => a.budget[m])));
+                    const Bfc = EXP.FY.map((_, m) => S(live.filter(a => !a.reserve).map(a => a.budget[m])));
+                    const A = EXP.FY.map((_, m) => m <= md.asOf ? S(live.map(a => a.actual[m] || 0)) : 0);
+                    return { A, B, Bfc, closed: md.asOf + 1, src: '販管費予実表（経営陣用）' };
+                }
+                const A = MK.kArr(monthlyData.expenses), B = MK.kArr(monthlyData.expensesBudget);
+                let last = -1; A.forEach((v, i) => { if (v) last = i; });
+                return { A, B, Bfc: B, closed: last + 1, src: '予算実績リスト（全社販管費）' };
+            },
+            // 粗利と販管費の見通しをまとめ、営業利益の見通しと確率を出す
+            pl: (A, B, curIdx, E) => {
+                const S = MK.sum;
+                const P = MK.outlook(A, B, curIdx, { seed: 20261021 });
+                const X = MK.outlook(E.A, E.Bfc, E.closed, { seed: 777, budgetFY: S(E.B) });
+                const opBudget = P.budgetFY - X.budgetFY, opLanding = P.landing - X.landing;
+                let opProb = null, op10 = null, op90 = null;
+                if (P.sims && X.sims) {
+                    const d = P.sims.map((v, k) => v - X.sims[k]);
+                    opProb = d.filter(v => v >= opBudget).length / d.length;
+                    d.sort((x, y) => x - y); op10 = d[Math.floor(d.length * 0.1)]; op90 = d[Math.floor(d.length * 0.9)];
+                }
+                const expProb = X.sims ? X.sims.filter(v => v <= X.budgetFY).length / X.sims.length : null;
+                const opProj = P.proj.map((v, m) => v - X.proj[m]), opB = B.map((v, m) => v - E.B[m]);
+                return { P, X, E, opBudget, opLanding, opProb, op10, op90, expProb, opProj, opB };
+            },
+            probText: (p) => p == null ? '—' : p >= 0.97 ? '95%以上' : p <= 0.03 ? '5%未満' : '約' + Math.round(p * 20) * 5 + '%',
+            probInfo: (p) => p == null ? { tone: 'gray', label: '判定に必要なデータが足りません' } : p >= 0.8 ? { tone: 'good', label: '達成の見込みが高い' } : p >= 0.5 ? { tone: 'good', label: '達成できる可能性のほうが高い' } : p >= 0.2 ? { tone: 'warn', label: '黄信号：このままでは届かない可能性が高い' } : { tone: 'bad', label: '赤信号：大きな上積みが必要' },
+            toneOfRatio: (a, b) => b <= 0 ? 'gray' : a >= b ? 'good' : a >= b * 0.95 ? 'warn' : 'bad'
+        };
+
+        function MkToggle({ view, setView }) {
+            return (
+                <div className="flex bg-gray-100 p-1 rounded-lg">
+                    {[['chart', 'グラフ'], ['table', '表']].map(([v, l]) => <button key={v} onClick={() => setView(v)} className={`px-5 py-2 text-sm font-bold rounded-md ${view === v ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500'}`}>{l}</button>)}
+                </div>
+            );
+        }
+
+        function MkHead({ id, view, setView, right }) {
+            const page = MK.PAGES.find(p => p.id === id);
+            return (
+                <div className="bg-white rounded-2xl card-shadow p-6">
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                        <div className="flex items-center gap-4">
+                            <div className="w-14 h-14 rounded-full bg-blue-600 text-white text-2xl font-extrabold flex items-center justify-center shrink-0">{page.n}</div>
+                            <div>
+                                <h2 className="text-2xl font-extrabold text-gray-800">{page.label}</h2>
+                                <p className="text-base text-gray-500 mt-1">確認すること：{page.q}</p>
+                            </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3">{right}{setView && <MkToggle view={view} setView={setView} />}</div>
+                    </div>
+                </div>
+            );
+        }
+
+        function MkNext({ id, onGo }) {
+            const i = MK.PAGES.findIndex(p => p.id === id), next = MK.PAGES[i + 1];
+            const rel = (MK_RELATED[id] || []).map(k => navItems.find(n => n.id === k)).filter(Boolean);
+            return (
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-20">
+                    <div className="flex flex-wrap items-center gap-2"><span className="text-sm text-gray-500">関連するページ：</span>{rel.map(n => <button key={n.id} onClick={() => onGo(n.id)} className="flex items-center gap-1 px-3 py-2 rounded-lg bg-white border border-gray-300 text-sm font-bold text-gray-700 hover:bg-blue-50"><Icon name={n.icon} size={14} />{n.label}</button>)}</div>
+                    {next ? <button onClick={() => onGo(next.id)} className="px-6 py-3 rounded-xl bg-blue-600 text-white text-base font-bold shadow hover:bg-blue-700">次へ：{next.n}. {next.label} ▶</button>
+                        : <button onClick={() => onGo(MK.PAGES[0].id)} className="px-6 py-3 rounded-xl bg-white border border-gray-300 text-gray-600 text-base font-bold hover:bg-gray-50">最初のページに戻る</button>}
+                </div>
+            );
+        }
+
+        function MkVerdict({ tone = 'gray', lines }) {
+            const t = MK.TONE[tone];
+            return (
+                <div className={`rounded-2xl border-2 ${t.bd} ${t.bg} p-6`}>
+                    <div className={`text-sm font-bold ${t.fg} mb-2`}>ひとことで言うと</div>
+                    <div className="space-y-1">{lines.filter(Boolean).map((l, i) => <p key={i} className="text-xl leading-relaxed text-gray-800">{l}</p>)}</div>
+                </div>
+            );
+        }
+
+        function MkBig({ label, value, sub, tone }) {
+            return (
+                <div className="bg-white rounded-2xl card-shadow p-6">
+                    <div className="text-base font-bold text-gray-500">{label}</div>
+                    <div className={`text-4xl font-extrabold mt-2 ${(MK.TONE[tone] || MK.TONE.gray).num}`}>{value}</div>
+                    {sub && <div className="text-sm text-gray-500 mt-2 leading-relaxed">{sub}</div>}
+                </div>
+            );
+        }
+
+        function MkSection({ title, lead, right, children }) {
+            return (
+                <section className="bg-white rounded-2xl card-shadow p-6">
+                    <div className="flex flex-col md:flex-row md:items-end justify-between gap-3 mb-5">
+                        <div>
+                            <h3 className="text-xl font-bold text-gray-800">{title}</h3>
+                            {lead && <p className="text-base text-gray-600 mt-1">{lead}</p>}
+                        </div>
+                        {right}
+                    </div>
+                    {children}
+                </section>
+            );
+        }
+
+        function MkMore({ title, children }) {
+            const [open, setOpen] = useState(false);
+            return (
+                <section className="rounded-2xl border border-dashed border-gray-300 bg-white/70">
+                    <button onClick={() => setOpen(!open)} className="w-full flex items-center justify-between px-6 py-4 text-left">
+                        <span className="text-base font-bold text-gray-600"><span className="text-xs px-2 py-0.5 rounded bg-gray-200 text-gray-600 mr-2">補足</span>{title}</span>
+                        <span className="text-sm text-blue-600 font-bold">{open ? '閉じる ▲' : '開く ▼'}</span>
+                    </button>
+                    {open && <div className="px-6 pb-6 space-y-4">{children}</div>}
+                </section>
+            );
+        }
+
+        function MkEmpty({ children }) { return <div className="text-base text-gray-400 py-8 text-center bg-gray-50 rounded-xl">{children}</div>; }
+
+        function MkTable({ head, rows, align }) {
+            return (
+                <div className="overflow-x-auto">
+                    <table className="w-full text-base whitespace-nowrap">
+                        <thead><tr className="bg-gray-100 text-gray-600">{head.map((h, i) => <th key={i} className={`px-4 py-3 text-sm font-bold ${(align && align[i]) === 'r' ? 'text-right' : 'text-left'}`}>{h}</th>)}</tr></thead>
+                        <tbody>{rows.map((r, i) => <tr key={i} className={`border-t border-gray-100 ${r.cls || ''}`}>{r.cells.map((c, j) => <td key={j} className={`px-4 py-3 ${(align && align[j]) === 'r' ? 'text-right font-mono' : ''}`}>{c}</td>)}</tr>)}</tbody>
+                    </table>
+                </div>
+            );
+        }
+
+        const MK_DL = { color: '#334155', font: { weight: 'bold', size: 13 } };
+        const mkTicksMan = { callback: v => (v / 1e4).toLocaleString() + '万', font: { size: 12 } };
+
+        function MkDiffChart({ rows, goodPositive = true }) {
+            const data = useMemo(() => ({ labels: rows.map(r => MK.short(r.label, 18)), datasets: [{ label: '差', data: rows.map(r => r.value), backgroundColor: rows.map(r => ((r.value >= 0) === goodPositive) ? '#10b981' : '#ef4444'), borderRadius: 4, barThickness: 24 }] }), [rows, goodPositive]);
+            const options = useMemo(() => ({ indexAxis: 'y', layout: { padding: { left: 10, right: 10 } }, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => XF.manS(c.raw) } }, datalabels: { ...MK_DL, display: true, anchor: c => c.dataset.data[c.dataIndex] >= 0 ? 'end' : 'start', align: c => c.dataset.data[c.dataIndex] >= 0 ? 'end' : 'start', formatter: v => XF.manS(v) } }, scales: { x: { grace: '25%', ticks: mkTicksMan, grid: { color: c => c.tick && c.tick.value === 0 ? '#64748b' : '#f1f5f9' } }, y: { ticks: { font: { size: 14 } }, grid: { display: false } } } }), []);
+            if (!rows.length) return <MkEmpty>差の出ている項目はありません</MkEmpty>;
+            return <div style={{ height: rows.length * 46 + 50 }}><ChartComponent type="bar" data={data} options={options} /></div>;
+        }
+
+        function MkHBars({ labels, sets }) {
+            const totals = labels.map((_, i) => sets.reduce((s, d) => s + (d.data[i] || 0), 0));
+            const data = useMemo(() => ({ labels: labels.map(l => MK.short(l, 18)), datasets: sets.map((d, k) => ({ label: d.label, data: d.data, backgroundColor: d.color, borderRadius: 4, barThickness: 24, datalabels: { ...MK_DL, display: k === sets.length - 1, anchor: 'end', align: 'end', formatter: (v, c) => XF.man(totals[c.dataIndex]) } })) }), [labels, sets]);
+            const options = useMemo(() => ({ indexAxis: 'y', layout: { padding: { right: 90 } }, plugins: { legend: { display: sets.length > 1 && !!sets[0].label, position: 'top', labels: { font: { size: 13 } } }, tooltip: { callbacks: { label: c => `${c.dataset.label || ''} ${XF.man(c.raw)}` } } }, scales: { x: { stacked: true, ticks: mkTicksMan }, y: { stacked: true, ticks: { font: { size: 14 } }, grid: { display: false } } } }), [sets.length]);
+            if (!labels.length) return <MkEmpty>該当するデータはありません</MkEmpty>;
+            return <div style={{ height: labels.length * 46 + 60 }}><ChartComponent type="bar" data={data} options={options} /></div>;
+        }
+
+        function MkBaseSelect({ baseDays, setBaseDays }) {
+            return (
+                <label className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                    比べる時点
+                    <select value={baseDays} onChange={e => setBaseDays(Number(e.target.value))} className="bg-white border border-gray-300 rounded px-2 py-1 text-sm font-bold text-gray-800">
+                        {MK.BASES.map(b => <option key={b.v} value={b.v}>{b.l}（{MK.md(MK.baseDate(b.v))}）</option>)}
+                    </select>
+                </label>
+            );
+        }
+
+        // ① 今月の粗利
+        function MkMonthPage({ monthlyData, projectList, lastYearProjectList, divisionMonthlyData, worksMaster, currentPeriod, view, setView, baseDays, setBaseDays, onGo }) {
+            const curIdx = MK.curIdx(currentPeriod);
+            const [month, setMonth] = useState(curIdx);
+            const [scope, setScope] = useState('month');
+            const baseD = MK.baseDate(baseDays), baseT = baseD.getTime(), baseL = MK.md(baseD);
+            const M = useMemo(() => {
+                const months = scope === 'month' ? [month] : Array.from({ length: month + 1 }, (_, i) => i);
+                const inM = (p) => months.includes(Utils.getFiscalMonthIndex(p.date));
+                const k = (arr) => months.reduce((s, m) => s + (Number((arr || [])[m]) || 0), 0) * 1000;
+                const act = k(monthlyData.actualProfit), bud = k(monthlyData.budgetProfit), ly = k(monthlyData.lastYearProfit);
+                const cur = (projectList || []).filter(inM);
+                const fresh = cur.filter(p => MK.isFresh(p, baseT));
+                const week = MK.sum(fresh.map(p => p.profit));
+                const weekWorks = MK.group(fresh, worksMaster).sort((a, b) => b.profit - a.profit);
+                const weekDiv = MK.DIVS.concat(['その他']).map(d => ({ div: d, v: MK.sum(fresh.filter(p => MK.divOf(p) === d).map(p => p.profit)) })).filter(x => x.v);
+                const divRows = MK.DIVS.map((d, i) => {
+                    const dm = (divisionMonthlyData && divisionMonthlyData['div' + (i + 1)]) || {};
+                    const a = k(dm.profit), b = k(dm.budgetProfit);
+                    const tops = MK.group(cur.filter(p => MK.divOf(p) === d), worksMaster).sort((x, y) => y.profit - x.profit).slice(0, 2);
+                    return { div: d + '事業部', act: a, bud: b, diff: a - b, tops };
+                });
+                const oa = act - MK.sum(divRows.map(r => r.act)), ob = bud - MK.sum(divRows.map(r => r.bud));
+                if (Math.abs(oa) >= 10000 || Math.abs(ob) >= 10000) divRows.push({ div: '事業部なし', act: oa, bud: ob, diff: oa - ob, tops: MK.group(cur.filter(p => MK.divOf(p) === 'その他'), worksMaster).sort((x, y) => y.profit - x.profit).slice(0, 2) });
+                const lyList = (lastYearProjectList || []).filter(inM);
+                const cm = {};
+                const add = (p, f) => { const kk = MK.cname(p.client); const o = cm[kk] || (cm[kk] = { name: p.client || '不明', cur: 0, ly: 0 }); o[f] += p.profit || 0; };
+                cur.forEach(p => add(p, 'cur')); lyList.forEach(p => add(p, 'ly'));
+                const cli = Object.values(cm).map(o => ({ ...o, diff: o.cur - o.ly }));
+                const ups = cli.filter(o => o.diff > 0).sort((a, b) => b.diff - a.diff).slice(0, 5);
+                const downs = cli.filter(o => o.diff < 0).sort((a, b) => a.diff - b.diff).slice(0, 5);
+                const jm = {};
+                cur.forEach(p => { const j = Utils.getJobCategory(p.job); (jm[j] = jm[j] || { name: j, cur: 0, ly: 0 }).cur += p.profit || 0; });
+                lyList.forEach(p => { const j = Utils.getJobCategory(p.job); (jm[j] = jm[j] || { name: j, cur: 0, ly: 0 }).ly += p.profit || 0; });
+                const jobs = Object.values(jm).map(o => ({ ...o, diff: o.cur - o.ly })).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+                return { act, bud, ly, fresh, week, weekWorks, weekDiv, divRows, ups, downs, jobs };
+            }, [monthlyData, projectList, lastYearProjectList, divisionMonthlyData, worksMaster, month, scope, baseT]);
+
+            const label = scope === 'month' || month === 0 ? `${MONTH_LABELS[month]}` : `3月〜${MONTH_LABELS[month]}の累計`;
+            const dB = M.act - M.bud, dL = M.act - M.ly;
+            const tone = MK.toneOfRatio(M.act, M.bud);
+            const divSorted = M.divRows.filter(r => r.bud > 0 || r.act).slice().sort((a, b) => b.diff - a.diff);
+            const upDiv = divSorted.find(r => r.diff > 0), downDiv = divSorted.slice().reverse().find(r => r.diff < 0);
+            const lines = [
+                <span>{label}の粗利は <b>{XF.man(M.act)}</b>。{M.bud > 0 && <>予算を <b className={dB >= 0 ? 'text-emerald-700' : 'text-red-700'}>{XF.man(Math.abs(dB))}{dB >= 0 ? '上回って' : '下回って'}</b> います（予算比 {MK.pct(M.act, M.bud)}）。</>}</span>,
+                M.ly > 0 && <span>昨年の同じ時期より <b className={dL >= 0 ? 'text-emerald-700' : 'text-red-700'}>{XF.man(Math.abs(dL))}{dL >= 0 ? '多く' : '少なく'}</b>、昨対は {MK.pct(M.act, M.ly)} です。</span>,
+                M.fresh.length === 0 ? <span>{baseL}より後に新しく登録された案件はありません。</span> : <span>{baseL}から <b>{M.week >= 0 ? '+' : ''}{XF.man(M.week)}</b> 増えました。{M.weekWorks[0] && <>いちばん大きいのは「{M.weekWorks[0].name}」（+{XF.man(M.weekWorks[0].profit)}）です。</>}</span>,
+                (upDiv || downDiv) && <span className="text-lg text-gray-700">予算との差：{upDiv && <>{upDiv.div}が {XF.manS(upDiv.diff)} で押し上げ</>}{upDiv && downDiv && '、'}{downDiv && <>{downDiv.div}が {XF.manS(downDiv.diff)} で押し下げ</>}ています。</span>,
+                (M.ups[0] || M.downs[0]) && <span className="text-lg text-gray-700">昨年との差：{M.ups[0] && <>「{M.ups[0].name}」が {XF.manS(M.ups[0].diff)}</>}{M.ups[0] && M.downs[0] && '、'}{M.downs[0] && <>「{M.downs[0].name}」が {XF.manS(M.downs[0].diff)}</>} と大きく動いています。</span>
+            ];
+
+            const top8 = M.weekWorks.slice(0, 8);
+            const weekSets = useMemo(() => [{ label: '', data: top8.map(w => w.profit), color: top8.map(w => MK.DIV_COLOR[w.div]) }], [M]);
+            const yoyRows = useMemo(() => M.ups.concat(M.downs.slice().reverse()).map(o => ({ label: o.name, value: o.diff })), [M]);
+            const divDiffRows = useMemo(() => M.divRows.map(r => ({ label: r.div, value: r.diff })), [M]);
+
+            const trend = useMemo(() => {
+                const A = MK.kArr(monthlyData.actualProfit), B = MK.kArr(monthlyData.budgetProfit), L = MK.kArr(monthlyData.lastYearProfit);
+                return { A, B, L, data: { labels: MONTH_LABELS, datasets: [
+                    { type: 'bar', label: '粗利（実績）', data: A, backgroundColor: MONTH_LABELS.map((_, i) => i === month ? '#f97316' : '#fdba74'), borderRadius: 4, order: 3 },
+                    { type: 'line', label: '予算', data: B, borderColor: '#475569', borderDash: [6, 4], borderWidth: 2, pointRadius: 3, fill: false, order: 1 },
+                    { type: 'line', label: '昨年', data: L, borderColor: '#a78bfa', borderWidth: 2, pointRadius: 2, fill: false, order: 2 }
+                ] } };
+            }, [monthlyData, month]);
+
+            return (
+                <div className="space-y-6">
+                    <MkHead id="mk_month" view={view} setView={setView} right={<MkBaseSelect baseDays={baseDays} setBaseDays={setBaseDays} />} />
+                    <div className="bg-white rounded-2xl card-shadow px-6 py-4 flex flex-col xl:flex-row xl:items-center gap-4">
+                        <div className="flex flex-wrap gap-1.5">
+                            {MONTH_LABELS.map((l, i) => <button key={i} onClick={() => setMonth(i)} className={`px-3 py-2 rounded-lg text-base font-bold border ${month === i ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-blue-50'}`}>{l}{i === curIdx && <span className={`ml-1 text-[10px] ${month === i ? 'text-blue-100' : 'text-blue-500'}`}>今月</span>}</button>)}
+                        </div>
+                        <div className="xl:ml-auto"><ToggleButton options={[{ value: 'month', label: 'この月だけ' }, { value: 'ytd', label: '期首からの累計' }]} value={scope} onChange={setScope} /></div>
+                    </div>
+
+                    <MkVerdict tone={tone} lines={lines} />
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                        <MkBig label={`${label}の粗利`} value={XF.man(M.act)} sub={<>予算 {XF.man(M.bud)} ／ 昨年 {XF.man(M.ly)}</>} />
+                        <MkBig label="予算対比" value={MK.pct(M.act, M.bud)} tone={tone} sub={<>予算との差 <b>{XF.manS(dB)}</b></>} />
+                        <MkBig label="昨年対比" value={MK.pct(M.act, M.ly)} tone={MK.toneOfRatio(M.act, M.ly)} sub={<>昨年との差 <b>{XF.manS(dL)}</b></>} />
+                        <MkBig label={`${baseL}からの増加`} value={(M.week >= 0 ? '+' : '') + XF.man(M.week)} tone={M.week > 0 ? 'good' : 'gray'} sub={<>{M.fresh.length}件の案件が新たに登録されました</>} />
+                    </div>
+
+                    <MkSection title="なぜ？ その1：先週から何が増えたか" lead={`${baseL}より後に登録された案件を、作品ごとにまとめています（色は事業部）。`}
+                        right={M.weekDiv.length > 0 && <div className="flex flex-wrap gap-2">{M.weekDiv.map(x => <span key={x.div} className="text-sm font-bold px-3 py-1.5 rounded-full text-white" style={{ background: MK.DIV_COLOR[x.div] }}>{x.div === 'その他' ? '事業部なし' : x.div} +{XF.man(x.v)}</span>)}</div>}>
+                        {M.fresh.length === 0 ? <MkEmpty>{baseL}より後に登録された案件はありません</MkEmpty> : view === 'chart' ? <MkHBars labels={top8.map(w => w.name)} sets={weekSets} /> : (
+                            <MkTable head={['作品', '事業部', 'クライアント', '主な案件', '件数', '粗利']} align={['l', 'l', 'l', 'l', 'r', 'r']}
+                                rows={M.weekWorks.map(w => ({ cells: [<span className="font-bold">{w.name}</span>, w.div, w.client, <span className="text-gray-500">{MK.short(w.top.title, 22)}</span>, w.count + '件', <b>{XF.man(w.profit)}</b>] }))} />
+                        )}
+                        {view === 'chart' && M.weekWorks.length > 8 && <p className="text-sm text-gray-500 mt-2">ほか {M.weekWorks.length - 8}作品（計 {XF.man(MK.sum(M.weekWorks.slice(8).map(w => w.profit)))}）。すべて見るには「表」に切り替えてください。</p>}
+                    </MkSection>
+
+                    <MkSection title="なぜ？ その2：予算との差はどこから来ているか" lead="事業部ごとの「粗利 − 予算」です。緑は予算を上回り、赤は下回っています。">
+                        {view === 'chart' ? <MkDiffChart rows={divDiffRows} /> : (
+                            <MkTable head={['事業部', '粗利', '予算', '差', '予算比', '粗利の大きい作品']} align={['l', 'r', 'r', 'r', 'r', 'l']}
+                                rows={M.divRows.map(r => ({ cells: [<b>{r.div}</b>, XF.man(r.act), XF.man(r.bud), <b className={r.diff >= 0 ? 'text-emerald-600' : 'text-red-600'}>{XF.manS(r.diff)}</b>, MK.pct(r.act, r.bud), <span className="text-gray-600 text-sm">{r.tops.map(t => `${MK.short(t.name, 14)}（${XF.man(t.profit)}）`).join('、') || '—'}</span>] }))} />
+                        )}
+                        {view === 'chart' && <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">{M.divRows.filter(r => r.div !== '事業部なし').map(r => <div key={r.div} className="text-sm bg-gray-50 rounded-xl p-3"><div className="font-bold text-gray-700 mb-1">{r.div}の粗利の大きい作品</div>{r.tops.length ? r.tops.map(t => <div key={t.key} className="flex justify-between gap-2"><span className="truncate">{t.name}</span><span className="font-mono shrink-0">{XF.man(t.profit)}</span></div>) : <span className="text-gray-400">なし</span>}</div>)}</div>}
+                    </MkSection>
+
+                    <MkSection title="なぜ？ その3：昨年との差はどこから来ているか" lead="クライアントごとに昨年の同じ時期と比べ、増えた上位5社・減った上位5社を出しています。">
+                        {M.ly <= 0 ? <MkEmpty>昨年の実績が読み込まれていません</MkEmpty> : view === 'chart' ? <MkDiffChart rows={yoyRows} /> : (
+                            <MkTable head={['クライアント', '今期', '昨年', '差']} align={['l', 'r', 'r', 'r']}
+                                rows={M.ups.concat(M.downs).map(o => ({ cells: [<b>{o.name}</b>, XF.man(o.cur), XF.man(o.ly), <b className={o.diff >= 0 ? 'text-emerald-600' : 'text-red-600'}>{XF.manS(o.diff)}</b>] }))} />
+                        )}
+                    </MkSection>
+
+                    <MkMore title="月ごとの推移（予算・昨年と比べて）">
+                        {view === 'chart' ? <div className="h-80"><ChartComponent type="bar" data={trend.data} options={{ plugins: { legend: { labels: { font: { size: 13 } } } }, scales: { y: { ticks: mkTicksMan } } }} /></div> : (
+                            <MkTable head={['月', '粗利', '予算', '予算との差', '昨年', '昨年との差']} align={['l', 'r', 'r', 'r', 'r', 'r']}
+                                rows={MONTH_LABELS.map((l, i) => ({ cls: i === month ? 'bg-orange-50' : '', cells: [l, XF.man(trend.A[i]), XF.man(trend.B[i]), <span className={trend.A[i] - trend.B[i] >= 0 ? 'text-emerald-600' : 'text-red-600'}>{XF.manS(trend.A[i] - trend.B[i])}</span>, XF.man(trend.L[i]), <span className={trend.A[i] - trend.L[i] >= 0 ? 'text-emerald-600' : 'text-red-600'}>{XF.manS(trend.A[i] - trend.L[i])}</span>] }))} />
+                        )}
+                    </MkMore>
+                    <MkMore title="職種ごとの昨年との差">
+                        <MkTable head={['職種', '今期', '昨年', '差']} align={['l', 'r', 'r', 'r']} rows={M.jobs.map(o => ({ cells: [o.name, XF.man(o.cur), XF.man(o.ly), <b className={o.diff >= 0 ? 'text-emerald-600' : 'text-red-600'}>{XF.manS(o.diff)}</b>] }))} />
+                    </MkMore>
+                    <MkMore title="数字の見方・計算のルール">
+                        <ul className="text-base text-gray-600 list-disc ml-5 space-y-1">
+                            <li>粗利は売上シート（board）の請求日で月を判定しています。</li>
+                            <li>「先週からの増加」は、登録日が比べる時点より後の案件の合計です。登録済み案件の金額修正・削除はこの数字には反映されません。</li>
+                            <li>昨年との比較は、昨期売上シートの同じ月どうしで比べています。クライアント名は「株式会社」や空白の違いをそろえてから集計しています。</li>
+                            <li>「事業部なし」は、売上シートの事業部欄が第1〜第3以外（空欄を含む）の案件と、全社予算のうち事業部に割り振られていない分です。</li>
+                        </ul>
+                    </MkMore>
+                    <MkNext id="mk_month" onGo={onGo} />
+                </div>
+            );
+        }
+
+        // ② 年間の見通し
+        function MkOutlookPage({ monthlyData, divisionMonthlyData, execPL, execItems, currentPeriod, view, setView, onGo }) {
+            const curIdx = MK.curIdx(currentPeriod);
+            const A = useMemo(() => MK.kArr(monthlyData.actualProfit), [monthlyData]);
+            const B = useMemo(() => MK.kArr(monthlyData.budgetProfit), [monthlyData]);
+            const L = useMemo(() => MK.kArr(monthlyData.lastYearProfit), [monthlyData]);
+            const E = useMemo(() => MK.expSeries(execPL, execItems, monthlyData), [execPL, execItems, monthlyData]);
+            const PL = useMemo(() => MK.pl(A, B, curIdx, E), [A, B, curIdx, E]);
+            const O = PL.P, X = PL.X;
+            const actN = Math.min(curIdx, E.closed);
+            const expClosedL = E.closed > 0 ? MONTH_LABELS[E.closed - 1] : null;
+            const opGap = PL.opLanding - PL.opBudget, xGap = X.landing - X.budgetFY;
+            const OPI = MK.probInfo(PL.opProb);
+            const XPI = PL.expProb == null ? { tone: 'gray', label: '判定に必要なデータが足りません' } : PL.expProb >= 0.8 ? { tone: 'good', label: '予算内に収まる見込みが高い' } : PL.expProb >= 0.5 ? { tone: 'good', label: '予算内に収まる可能性のほうが高い' } : PL.expProb >= 0.2 ? { tone: 'warn', label: '黄信号：予算を超える可能性が高い' } : { tone: 'bad', label: '赤信号：予算超過がほぼ確実' };
+            const divs = useMemo(() => MK.DIVS.map((d, i) => {
+                const dm = (divisionMonthlyData && divisionMonthlyData['div' + (i + 1)]) || {};
+                return { div: d + '事業部', ...MK.outlook(MK.kArr(dm.profit), MK.kArr(dm.budgetProfit), curIdx) };
+            }), [divisionMonthlyData, curIdx]);
+            const P = MK.probInfo(O.prob);
+            const gap = O.landing - O.budgetFY;
+            const progress = MK.sum(A.slice(0, curIdx + 1)), budToNow = MK.sum(B.slice(0, curIdx + 1));
+            const lyFY = MK.sum(L), lyToNow = MK.sum(L.slice(0, curIdx + 1));
+            const lastClosed = curIdx > 0 ? MONTH_LABELS[curIdx - 1] : null;
+            const worst = divs.filter(d => d.budgetFY > 0).slice().sort((a, b) => (a.landing - a.budgetFY) - (b.landing - b.budgetFY))[0];
+
+            const lines = O.budgetFY <= 0 ? ['予算が読み込まれていないため、見通しを出せません。'] : curIdx === 0 ? ['期が始まったばかりのため、まだ見通しを出せません（締めた月が3か月以上で計算します）。'] : [
+                <span>このままのペースなら、年間の粗利は <b>約{XF.man(O.landing)}</b>（予算に <b className={gap >= 0 ? 'text-emerald-700' : 'text-red-700'}>{XF.manS(gap)}</b>）、販管費は <b>約{XF.man(X.landing)}</b>（予算に <b className={xGap <= 0 ? 'text-emerald-700' : 'text-red-700'}>{XF.manS(xGap)}</b>）。</span>,
+                X.budgetFY > 0 && <span>その結果、営業利益は <b>約{XF.man(PL.opLanding)}</b> で、予算 {XF.man(PL.opBudget)} に <b className={opGap >= 0 ? 'text-emerald-700' : 'text-red-700'}>{XF.man(Math.abs(opGap))}{opGap >= 0 ? '届く' : '足りない'}</b> 見込みです。</span>,
+                (O.prob != null || PL.opProb != null) && <span>予算を達成できる確率は、粗利 <b>{MK.probText(O.prob)}</b>・営業利益 <b>{MK.probText(PL.opProb)}</b> です。</span>,
+                O.needRatio != null && <span>{lastClosed}までの予算達成率は平均 <b>{Math.round(O.rbar * 100)}%</b>。残り{O.remN}か月で予算の <b>{Math.round(O.needRatio * 100)}%</b> を出せば達成できます。</span>,
+                worst && worst.landing < worst.budgetFY && <span className="text-lg text-gray-700">いちばん予算に届きにくいのは{worst.div}（見込 {XF.manS(worst.landing - worst.budgetFY)}）です。</span>
+            ];
+
+            const chart = useMemo(() => {
+                const cum = (arr) => { let s = 0; return arr.map(v => s += v); };
+                const cA = cum(A), cP = cum(O.proj), cB = cum(B), cL = cum(L);
+                return { labels: MONTH_LABELS, datasets: [
+                    { type: 'line', label: '実績（累計）', data: cA.map((v, i) => i < curIdx ? v : null), borderColor: '#f97316', backgroundColor: '#f97316', borderWidth: 4, pointRadius: 4, fill: false, order: 1 },
+                    { type: 'line', label: 'このままのペース（見込）', data: cP.map((v, i) => i >= curIdx - 1 && curIdx > 0 ? v : null), borderColor: '#f97316', borderDash: [6, 5], borderWidth: 3, pointRadius: 3, fill: false, order: 2 },
+                    { type: 'line', label: '予算（累計）', data: cB, borderColor: '#475569', borderDash: [3, 3], borderWidth: 2, pointRadius: 0, fill: false, order: 3 },
+                    { type: 'line', label: '昨年（累計）', data: cL, borderColor: '#c4b5fd', borderWidth: 2, pointRadius: 0, fill: false, order: 4 }
+                ] };
+            }, [A, B, L, O, curIdx]);
+            const divDiff = useMemo(() => divs.filter(d => d.budgetFY > 0).map(d => ({ label: d.div, value: d.landing - d.budgetFY })), [divs]);
+            const opChart = useMemo(() => {
+                const cum = (arr) => { let s = 0; return arr.map(v => s += v); };
+                const cO = cum(PL.opProj), cB = cum(PL.opB);
+                return { labels: MONTH_LABELS, datasets: [
+                    { type: 'bar', label: '営業利益（月ごと）', data: PL.opProj, backgroundColor: PL.opProj.map((v, i) => i < actN ? (v >= 0 ? '#93c5fd' : '#fca5a5') : (v >= 0 ? 'rgba(147,197,253,0.4)' : 'rgba(252,165,165,0.4)')), borderRadius: 4, order: 4 },
+                    { type: 'line', label: '実績（累計）', data: cO.map((v, i) => i < actN ? v : null), borderColor: '#2563eb', backgroundColor: '#2563eb', borderWidth: 4, pointRadius: 4, fill: false, order: 1 },
+                    { type: 'line', label: 'このままのペース（累計）', data: cO.map((v, i) => i >= actN - 1 && actN > 0 ? v : null), borderColor: '#2563eb', borderDash: [6, 5], borderWidth: 3, pointRadius: 3, fill: false, order: 2 },
+                    { type: 'line', label: '予算（累計）', data: cB, borderColor: '#475569', borderDash: [3, 3], borderWidth: 2, pointRadius: 0, fill: false, order: 3 }
+                ] };
+            }, [PL, actN]);
+
+            return (
+                <div className="space-y-6">
+                    <MkHead id="mk_outlook" view={view} setView={setView} />
+                    <MkVerdict tone={PL.opProb != null ? OPI.tone : O.prob == null ? MK.toneOfRatio(O.landing, O.budgetFY) : P.tone} lines={lines} />
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                        {[
+                            { k: '粗利', land: O.landing, bud: O.budgetFY, diff: gap, good: gap >= 0, pl: '予算を達成できる確率', pv: O.prob, pi: P, range: O.p10 != null ? [O.p10, O.p90] : null },
+                            { k: '販管費', land: X.landing, bud: X.budgetFY, diff: xGap, good: xGap <= 0, pl: '予算内に収まる確率', pv: PL.expProb, pi: XPI, note: expClosedL ? `${expClosedL}まで締め済み` : '実績なし' },
+                            { k: '営業利益', land: PL.opLanding, bud: PL.opBudget, diff: opGap, good: opGap >= 0, pl: '予算を達成できる確率', pv: PL.opProb, pi: OPI, range: PL.op10 != null ? [PL.op10, PL.op90] : null, main: true }
+                        ].map(c => { const t = MK.TONE[c.good ? 'good' : 'bad']; return (
+                            <div key={c.k} className={`bg-white rounded-2xl card-shadow p-6 ${c.main ? 'ring-2 ring-blue-300' : ''}`}>
+                                <div className="flex items-center justify-between"><div className="text-lg font-bold text-gray-700">{c.k}<span className="text-sm font-normal text-gray-400 ml-2">年間の着地見込</span></div>{c.note && <span className="text-xs text-gray-400">{c.note}</span>}</div>
+                                <div className={`text-4xl font-extrabold mt-2 ${t.num}`}>約{XF.man(c.land)}</div>
+                                <div className="text-base text-gray-600 mt-2">予算 {XF.man(c.bud)}　差 <b className={t.fg}>{XF.manS(c.diff)}</b>（予算比 {MK.pct(c.land, c.bud)}）</div>
+                                <div className={`mt-3 rounded-xl px-4 py-3 ${MK.TONE[c.pi.tone].bg}`}><div className="text-sm text-gray-600">{c.pl}</div><div className={`text-2xl font-extrabold ${MK.TONE[c.pi.tone].num}`}>{MK.probText(c.pv)}</div><div className="text-sm text-gray-600">{c.pi.label}</div>{c.range && <div className="text-xs text-gray-500 mt-1">8割の確率で {XF.man(c.range[0])}〜{XF.man(c.range[1])}</div>}</div>
+                            </div>
+                        ); })}
+                    </div>
+
+                    <MkSection title="営業利益の見通し（月ごと）" lead={`営業利益 ＝ 粗利 − 販管費。実線が実績、点線がこのままのペースで進んだ場合の累計です。${E.closed < curIdx && expClosedL ? `販管費は${expClosedL}まで締め済みのため、それ以降の月は販管費を見込で計算しています。` : ''}`}>
+                        {view === 'chart' ? <div className="h-96"><ChartComponent type="line" data={opChart} options={{ plugins: { legend: { labels: { font: { size: 13 } } } }, scales: { y: { ticks: mkTicksMan } } }} /></div> : (() => {
+                            let co = 0, cb = 0;
+                            return <MkTable head={['月', '', '粗利', '販管費', '営業利益', '営業利益の予算', '差', '累計の営業利益', '累計の予算']} align={['l', 'l', 'r', 'r', 'r', 'r', 'r', 'r', 'r']}
+                                rows={MONTH_LABELS.map((l, i) => { const op = PL.opProj[i], ob = PL.opB[i]; co += op; cb += ob; const st = i < actN ? '実績' : (i < curIdx ? '一部見込' : '見込'); return { cls: i === actN ? 'border-t-2 border-orange-300' : '', cells: [l, <span className={`text-xs px-2 py-0.5 rounded ${st === '実績' ? 'bg-gray-100 text-gray-600' : 'bg-orange-100 text-orange-700'}`}>{st}</span>, XF.man(O.proj[i]), XF.man(X.proj[i]), <b className={op < 0 ? 'text-red-600' : ''}>{XF.man(op)}</b>, XF.man(ob), <span className={op - ob >= 0 ? 'text-emerald-600' : 'text-red-600'}>{XF.manS(op - ob)}</span>, XF.man(co), XF.man(cb)] }; }).concat([{ cls: 'bg-gray-50 font-bold', cells: ['通期', '', XF.man(O.landing), XF.man(X.landing), XF.man(PL.opLanding), XF.man(PL.opBudget), <span className={opGap >= 0 ? 'text-emerald-600' : 'text-red-600'}>{XF.manS(opGap)}</span>, '', ''] }])} />;
+                        })()}
+                    </MkSection>
+
+                    <h3 className="text-xl font-bold text-gray-700 pt-2">粗利の詳しい見通し</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                        <MkBig label="年間の着地見込（このままのペース）" value={'約' + XF.man(O.landing)} tone={MK.toneOfRatio(O.landing, O.budgetFY)} sub={<>通期予算 {XF.man(O.budgetFY)}　差 <b>{XF.manS(gap)}</b></>} />
+                        <MkBig label="予算を達成できる確率" value={MK.probText(O.prob)} tone={P.tone} sub={<>{P.label}{O.p10 != null && <><br />8割の確率で {XF.man(O.p10)}〜{XF.man(O.p90)} に着地</>}</>} />
+                        <MkBig label="いまの進捗（通期予算に対して）" value={MK.pct(progress, O.budgetFY)} tone={progress >= budToNow ? 'good' : 'warn'} sub={<>今月までの粗利 {XF.man(progress)}<br />予算どおりなら今月末で {MK.pct(budToNow, O.budgetFY)}{lyFY > 0 && <>／昨年は同じ時期に {MK.pct(lyToNow, lyFY)}</>}</>} />
+                        <MkBig label={`残り${O.remN}か月に必要なペース`} value={O.needRatio != null ? `予算の${Math.round(O.needRatio * 100)}%` : '—'} tone={O.needRatio == null ? 'gray' : O.rbar != null && O.rbar >= O.needRatio ? 'good' : 'warn'} sub={<>これまでの平均は予算の{O.rbar != null ? Math.round(O.rbar * 100) + '%' : '—'}{O.booked > 0 && <><br />今月以降の分として {XF.man(O.booked)} を受注済み</>}</>} />
+                    </div>
+
+                    <MkSection title="粗利の積み上がり（累計）" lead="オレンジの実線がこれまでの実績、点線がこのままのペースで進んだ場合です。グレーの点線（予算）を上回っていれば順調です。">
+                        {view === 'chart' ? <div className="h-96"><ChartComponent type="line" data={chart} options={{ plugins: { legend: { labels: { font: { size: 13 } } } }, scales: { y: { ticks: mkTicksMan } } }} /></div> : (() => {
+                            let cp = 0, cb = 0, cl = 0;
+                            return <MkTable head={['月', '予算', '実績・見込', '', '昨年', '累計（実績＋見込）', '累計予算', '累計の差']} align={['l', 'r', 'r', 'l', 'r', 'r', 'r', 'r']}
+                                rows={MONTH_LABELS.map((l, i) => { cp += O.proj[i]; cb += B[i]; cl += L[i]; return { cls: i === curIdx ? 'bg-orange-50' : '', cells: [l, XF.man(B[i]), <b>{XF.man(O.proj[i])}</b>, <span className={`text-xs px-2 py-0.5 rounded ${i < curIdx ? 'bg-gray-100 text-gray-600' : 'bg-orange-100 text-orange-700'}`}>{i < curIdx ? '実績' : i === curIdx ? '今月（見込）' : '見込'}</span>, XF.man(L[i]), XF.man(cp), XF.man(cb), <span className={cp - cb >= 0 ? 'text-emerald-600' : 'text-red-600'}>{XF.manS(cp - cb)}</span>] }; })} />;
+                        })()}
+                    </MkSection>
+
+                    <MkSection title="事業部ごとの見通し" lead="同じ計算を事業部ごとに行い、「年間の着地見込 − 予算」を出しています。">
+                        {view === 'chart' ? <MkDiffChart rows={divDiff} /> : (
+                            <MkTable head={['事業部', '着地見込', '通期予算', '差', '予算比', '達成の確率', 'これまでの達成率']} align={['l', 'r', 'r', 'r', 'r', 'r', 'r']}
+                                rows={divs.map(d => ({ cells: [<b>{d.div}</b>, XF.man(d.landing), XF.man(d.budgetFY), <b className={d.landing - d.budgetFY >= 0 ? 'text-emerald-600' : 'text-red-600'}>{XF.manS(d.landing - d.budgetFY)}</b>, MK.pct(d.landing, d.budgetFY), <span className={(MK.TONE[MK.probInfo(d.prob).tone]).num + ' font-bold'}>{MK.probText(d.prob)}</span>, d.rbar != null ? Math.round(d.rbar * 100) + '%' : '—'] }))} />
+                        )}
+                        {view === 'chart' && <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">{divs.map(d => { const t = MK.TONE[MK.probInfo(d.prob).tone]; return <div key={d.div} className={`rounded-xl border ${t.bd} ${t.bg} p-4`}><div className="text-sm font-bold text-gray-600">{d.div}</div><div className="text-base mt-1">達成の確率 <b className={`text-2xl ${t.num}`}>{MK.probText(d.prob)}</b></div><div className="text-sm text-gray-500 mt-1">着地見込 {XF.man(d.landing)} ／ 予算 {XF.man(d.budgetFY)}</div></div>; })}</div>}
+                    </MkSection>
+
+                    <MkMore title="見込と確率の計算方法">
+                        <ul className="text-base text-gray-600 list-disc ml-5 space-y-1">
+                            <li>「このままのペース」＝ 締めた月（{lastClosed || '—'}まで）の実績 ＋ 今月以降の各月の予算 × これまでの予算達成率（{O.rbar != null ? Math.round(O.rbar * 100) + '%' : '—'}）。すでに受注済みの金額のほうが大きい月は、受注済みの金額を使います。</li>
+                            <li>「達成できる確率」＝ これまでの月ごとの予算達成率（{O.ratios.map(r => Math.round(r * 100) + '%').join('・') || '—'}）が、残りの月にもランダムに起こると仮定して4,000回試算し、予算に届いた割合です。締めた月が3か月未満のときは出しません。</li>
+                            <li>販管費の見込 ＝ 締めた月（{expClosedL || '—'}まで）の実績 ＋ 残りの月の予算 × これまでの予算に対する使用率（{X.rbar != null ? Math.round(X.rbar * 100) + '%' : '—'}）。予備費・バッファは今後使わない前提で見込から外しています（予算には含みます）。データ元：{E.src}。</li>
+                            <li>営業利益 ＝ 粗利 − 販管費。確率は、粗利と販管費をそれぞれ4,000回試算した結果を組み合わせて出しています。</li>
+                            <li>あくまで過去のペースからの目安です。大型案件の受注や失注、臨時の支出の予定は入っていません。作品ごとの積み上げで見る場合は「詳しく見る → 見込」をご覧ください。</li>
+                        </ul>
+                    </MkMore>
+                    <MkNext id="mk_outlook" onGo={onGo} />
+                </div>
+            );
+        }
+
+        // ③ 注目の作品・案件
+        function MkWorksPage({ projectList, worksMaster, view, setView, baseDays, setBaseDays, onGo }) {
+            const [th, setTh] = useState(1000000);
+            const [order, setOrder] = useState('week');
+            const [allCards, setAllCards] = useState(false);
+            const baseD = MK.baseDate(baseDays), baseT = baseD.getTime(), baseL = MK.md(baseD);
+            const W = useMemo(() => {
+                const all = projectList || [];
+                const fresh = all.filter(p => MK.isFresh(p, baseT));
+                const big = fresh.filter(p => (p.profit || 0) >= th).sort((a, b) => b.profit - a.profit);
+                const freshTop = fresh.slice().sort((a, b) => b.profit - a.profit).slice(0, 3);
+                const works = MK.group(all, worksMaster).map(g => ({ ...g, week: MK.sum(g.items.filter(p => MK.isFresh(p, baseT)).map(p => p.profit)) }));
+                const total = MK.sum(all.map(p => p.profit));
+                const risky = all.filter(p => (p.profit || 0) < 0 || ((p.sales || 0) >= 1000000 && (p.profit || 0) / p.sales < 0.1)).sort((a, b) => a.profit / Math.max(1, a.sales) - b.profit / Math.max(1, b.sales));
+                return { fresh, big, freshTop, works, total, risky };
+            }, [projectList, worksMaster, baseT, th]);
+            const ranked = useMemo(() => W.works.filter(w => order === 'week' ? w.week > 0 : true).sort((a, b) => order === 'week' ? b.week - a.week : b.profit - a.profit).slice(0, 10), [W, order]);
+            const sets = useMemo(() => [{ label: `${baseL}まで`, data: ranked.map(w => w.profit - w.week), color: '#cbd5e1' }, { label: `${baseL}より後の増加`, data: ranked.map(w => w.week), color: '#f97316' }], [ranked, baseL]);
+            const cards = W.big.length ? W.big : W.freshTop;
+            const lines = [
+                W.big.length ? <span>{baseL}より後に、粗利 <b>{XF.man(th)}以上</b> の案件が <b>{W.big.length}件</b> 登録されました（合計 {XF.man(MK.sum(W.big.map(p => p.profit)))}）。</span> : <span>{baseL}より後に、粗利 {XF.man(th)}以上の案件の登録はありません。</span>,
+                W.big[0] && <span>最大は「{MK.workName(W.big[0], worksMaster)}」の {MK.short(W.big[0].title, 24)}（粗利 <b>{XF.man(W.big[0].profit)}</b>）です。</span>,
+                W.risky.length > 0 && <span className="text-lg text-gray-700">粗利がマイナス、または粗利率10%未満の大きめの案件が {W.risky.length}件あります（下の補足を参照）。</span>
+            ];
+            return (
+                <div className="space-y-6">
+                    <MkHead id="mk_works" view={view} setView={setView} right={<>
+                        <MkBaseSelect baseDays={baseDays} setBaseDays={setBaseDays} />
+                        <label className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">大きな案件の基準
+                            <select value={th} onChange={e => setTh(Number(e.target.value))} className="bg-white border border-gray-300 rounded px-2 py-1 text-sm font-bold text-gray-800">{[500000, 1000000, 3000000, 5000000].map(v => <option key={v} value={v}>粗利 {XF.man(v)}以上</option>)}</select>
+                        </label></>} />
+                    <MkVerdict tone={W.big.length ? 'good' : 'gray'} lines={lines} />
+
+                    <MkSection title={`${baseL}より後に登録された大きな案件`} lead={W.big.length ? `粗利 ${XF.man(th)}以上の案件を、粗利の大きい順に並べています。` : '基準を超える案件がないため、期間内の上位3件を表示しています。'}>
+                        {cards.length === 0 ? <MkEmpty>期間内に登録された案件はありません</MkEmpty> : view === 'table' ? (
+                            <MkTable head={['作品', '案件名', 'クライアント', '事業部', '請求日', '登録日', '売上', '粗利', '粗利率']} align={['l', 'l', 'l', 'l', 'l', 'l', 'r', 'r', 'r']}
+                                rows={cards.map(p => ({ cells: [<b>{MK.workName(p, worksMaster)}</b>, MK.short(p.title, 22), p.client || '—', MK.divOf(p) === 'その他' ? '事業部なし' : MK.divOf(p), String(p.date || '').substring(0, 10), String(p.regDate || '').substring(0, 10), XF.man(p.sales), <b className="text-orange-600">{XF.man(p.profit)}</b>, MK.pct(p.profit, p.sales)] }))} />
+                        ) : (<>
+                            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                                {(allCards ? cards : cards.slice(0, 6)).map((p, i) => (
+                                    <div key={i} className={`rounded-2xl border-2 p-5 ${W.big.length ? 'border-orange-300 bg-orange-50/60' : 'border-gray-200 bg-gray-50'}`}>
+                                        <div className="flex items-start justify-between gap-2">
+                                            <div className="text-lg font-bold text-gray-800 leading-snug">{MK.workName(p, worksMaster)}</div>
+                                            <span className="text-xs font-bold px-2 py-1 rounded text-white shrink-0" style={{ background: MK.DIV_COLOR[MK.divOf(p)] }}>{MK.divOf(p) === 'その他' ? '事業部なし' : MK.divOf(p)}</span>
+                                        </div>
+                                        <div className="text-sm text-gray-600 mt-1">{p.title}</div>
+                                        <div className="text-sm text-gray-500 mt-1">{p.client || '—'}　／　請求 {String(p.date || '').substring(0, 10) || '—'}　／　登録 {String(p.regDate || '').substring(0, 10)}</div>
+                                        <div className="mt-4 flex items-end justify-between">
+                                            <div><div className="text-xs text-gray-500">粗利</div><div className="text-3xl font-extrabold text-orange-600">{XF.man(p.profit)}</div></div>
+                                            <div className="text-right text-sm text-gray-600">売上 {XF.man(p.sales)}<br />粗利率 {MK.pct(p.profit, p.sales)}</div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            {cards.length > 6 && <div className="mt-4 text-center"><button onClick={() => setAllCards(!allCards)} className="px-5 py-2.5 rounded-xl border border-gray-300 bg-white text-base font-bold text-gray-700 hover:bg-gray-50">{allCards ? '上位6件だけ表示する' : `残り${cards.length - 6}件も表示する`}</button></div>}
+                        </>)}
+                    </MkSection>
+
+                    <MkSection title="作品ごとの粗利（今期）" lead={order === 'week' ? `${baseL}より後に粗利が増えた作品を、増えた額の大きい順に10作品。オレンジが増えた分です。` : '今期の粗利が大きい順に10作品。オレンジが今回増えた分です。'}
+                        right={<ToggleButton options={[{ value: 'week', label: '増えた額の順' }, { value: 'total', label: '今期の合計順' }]} value={order} onChange={setOrder} />}>
+                        {ranked.length === 0 ? <MkEmpty>該当する作品はありません</MkEmpty> : view === 'chart' ? <MkHBars labels={ranked.map(w => w.name)} sets={sets} /> : (
+                            <MkTable head={['順位', '作品', '事業部', '主なクライアント', '今期の粗利', `うち${baseL}より後`, '全社に占める割合', '件数']} align={['l', 'l', 'l', 'l', 'r', 'r', 'r', 'r']}
+                                rows={ranked.map((w, i) => ({ cells: [i + 1, <b>{w.name}</b>, w.div === 'その他' ? '事業部なし' : w.div, w.client, <b>{XF.man(w.profit)}</b>, <span className={w.week > 0 ? 'text-orange-600 font-bold' : 'text-gray-400'}>{w.week ? '+' + XF.man(w.week) : '—'}</span>, MK.pct(w.profit, W.total), w.count + '件'] }))} />
+                        )}
+                    </MkSection>
+
+                    <MkMore title={`注意が必要な案件（粗利マイナス・粗利率10%未満）${W.risky.length ? ' ' + W.risky.length + '件' : ''}`}>
+                        {W.risky.length === 0 ? <MkEmpty>該当する案件はありません</MkEmpty> : (
+                            <MkTable head={['作品', '案件名', 'クライアント', '事業部', '売上', '粗利', '粗利率']} align={['l', 'l', 'l', 'l', 'r', 'r', 'r']}
+                                rows={W.risky.slice(0, 30).map(p => ({ cells: [MK.workName(p, worksMaster), MK.short(p.title, 24), p.client || '—', MK.divOf(p), XF.man(p.sales), <b className={p.profit < 0 ? 'text-red-600' : ''}>{XF.man(p.profit)}</b>, MK.pct(p.profit, p.sales)] }))} />
+                        )}
+                        <p className="text-sm text-gray-500">対象：粗利がマイナスの案件、または売上100万円以上で粗利率10%未満の案件（粗利率の低い順、最大30件）。</p>
+                    </MkMore>
+                    <MkNext id="mk_works" onGo={onGo} />
+                </div>
+            );
+        }
+
+        // ④ 販管費（要点）
+        function MkExpensePage({ execPL, execItems, monthlyData, view, setView, onGo, onOpenDetail, onOpenSettings }) {
+            const model = useMemo(() => execPL ? EXP.build(execPL, execItems, -1) : null, [execPL, execItems]);
+            const fallback = useMemo(() => {
+                if (model) return null;
+                const E = MK.kArr(monthlyData.expenses), EB = MK.kArr(monthlyData.expensesBudget);
+                let last = -1; E.forEach((v, i) => { if (v) last = i; });
+                return { E, EB, last };
+            }, [model, monthlyData]);
+
+            if (!model) {
+                const f = fallback, N = f.last + 1;
+                const a = MK.sum(f.E.slice(0, N)), b = MK.sum(f.EB.slice(0, N));
+                return (
+                    <div className="space-y-6">
+                        <MkHead id="mk_exp" />
+                        <div className="rounded-2xl border-2 border-amber-300 bg-amber-50 p-6 text-base text-amber-900">
+                            科目ごとの販管費（経営陣用の販管費予実表）が読み込まれていないため、合計だけを表示しています。右上の「連携」で経営陣用の連携URLと合言葉を設定してください。
+                            <button onClick={onOpenSettings} className="ml-3 px-4 py-2 rounded-lg bg-amber-600 text-white text-sm font-bold">連携を設定する</button>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <MkBig label={N > 0 ? `${MONTH_LABELS[f.last]}の販管費` : '販管費'} value={N > 0 ? XF.man(f.E[f.last]) : '—'} tone={N > 0 && f.E[f.last] > f.EB[f.last] ? 'bad' : 'good'} sub={N > 0 && <>予算 {XF.man(f.EB[f.last])}　差 {XF.manS(f.E[f.last] - f.EB[f.last])}</>} />
+                            <MkBig label="累計の販管費" value={XF.man(a)} tone={a > b ? 'bad' : 'good'} sub={<>予算 {XF.man(b)}　差 {XF.manS(a - b)}</>} />
+                        </div>
+                        <MkNext id="mk_exp" onGo={onGo} />
+                    </div>
+                );
+            }
+
+            const { FY, asOf, totals, accounts, issues, N } = model;
+            const T = totals.all, mon = FY[asOf];
+            const over = accounts.filter(a => !a.reserve && a.diffYTD > 0).sort((a, b) => b.diffYTD - a.diffYTD);
+            const top = over.slice(0, 5);
+            const under = accounts.filter(a => !a.reserve && a.diffYTD < 0).sort((a, b) => a.diffYTD - b.diffYTD).slice(0, 3);
+            const moves = issues.filter(i => ['surge', 'new', 'stopped'].includes(i.kind)).slice(0, 5);
+            const dataIssues = issues.filter(i => i.level === 'red');
+            const mainOf = (a) => a.items.filter(i => i.ytd > 0).sort((x, y) => y.ytd - x.ytd).slice(0, 2).map(i => MK.short(i.name, 16)).join('、');
+            const XO = MK.outlook(...(() => { const E = MK.expSeries(execPL, execItems, monthlyData); return [E.A, E.Bfc, E.closed, { seed: 777, budgetFY: MK.sum(E.B) }]; })());
+            const dCur = T.cur - T.curBudget, dYTD = T.actualYTD - T.budgetYTD, dFY = XO.landing - T.budgetFY;
+            const lines = [
+                <span>{mon}の販管費は <b>{XF.man(T.cur)}</b>。予算より <b className={dCur <= 0 ? 'text-emerald-700' : 'text-red-700'}>{XF.man(Math.abs(dCur))}{dCur <= 0 ? '少なく' : '多く'}</b> なっています（予算比 {MK.pct(T.cur, T.curBudget)}）。</span>,
+                <span>3月〜{mon}の累計は予算に対して <b className={dYTD <= 0 ? 'text-emerald-700' : 'text-red-700'}>{XF.manS(dYTD)}</b>、このペースだと通期では予算に対して <b className={dFY <= 0 ? 'text-emerald-700' : 'text-red-700'}>{XF.manS(dFY)}</b> の見込みです。</span>,
+                <span>{top.length ? <>まず確認したいのは、予算を超えている <b>{top.map(a => a.name).slice(0, 3).join('・')}</b> です。</> : '予算を超えている科目はありません。'}</span>
+            ];
+            const chartRows = top.map(a => ({ label: a.name, value: a.diffYTD }));
+            return (
+                <div className="space-y-6">
+                    <MkHead id="mk_exp" view={view} setView={setView} right={<span className="text-sm text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">{mon}まで締め済み</span>} />
+                    <MkVerdict tone={dYTD <= 0 && dFY <= 0 ? 'good' : dFY <= 0 ? 'warn' : 'bad'} lines={lines} />
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <MkBig label={`${mon}の販管費`} value={XF.man(T.cur)} tone={dCur <= 0 ? 'good' : 'bad'} sub={<>予算 {XF.man(T.curBudget)}　差 <b>{XF.manS(dCur)}</b></>} />
+                        <MkBig label={`累計（3月〜${mon}）`} value={XF.man(T.actualYTD)} tone={dYTD <= 0 ? 'good' : 'bad'} sub={<>予算 {XF.man(T.budgetYTD)}　差 <b>{XF.manS(dYTD)}</b></>} />
+                        <MkBig label="通期の見込（このペース）" value={'約' + XF.man(XO.landing)} tone={dFY <= 0 ? 'good' : 'bad'} sub={<>通期予算 {XF.man(T.budgetFY)}　差 <b>{XF.manS(dFY)}</b></>} />
+                    </div>
+
+                    <MkSection title="まず確認する科目（予算を超えている順）" lead={`3月〜${mon}の累計で、予算を超えている金額の大きい科目です（最大5つ）。`}>
+                        {top.length === 0 ? <MkEmpty>予算を超えている科目はありません</MkEmpty> : view === 'chart' ? <MkDiffChart rows={chartRows} goodPositive={false} /> : (
+                            <MkTable head={['科目', '累計の実績', '累計の予算', '超えている額', '予算比', '通期の見込（直近3か月のペース）', '主な中身']} align={['l', 'r', 'r', 'r', 'r', 'r', 'l']}
+                                rows={top.map(a => ({ cells: [<b>{a.name}</b>, XF.man(a.actualYTD), XF.man(a.budgetYTD), <b className="text-red-600">{XF.manS(a.diffYTD)}</b>, XF.pct(a.ratioYTD), <span className={a.forecastPace > a.budgetFY ? 'text-red-600' : ''}>{XF.man(a.forecastPace)}</span>, <span className="text-sm text-gray-600">{mainOf(a) || '—'}</span>] }))} />
+                        )}
+                        {view === 'chart' && top.length > 0 && <div className="mt-4 space-y-2">{top.map(a => <div key={a.key} className="text-base bg-gray-50 rounded-xl px-4 py-3 flex flex-col md:flex-row md:items-center gap-1 md:gap-4"><b className="text-gray-800 md:w-48 shrink-0">{a.name}</b><span className="text-gray-600 text-sm">予算比 {XF.pct(a.ratioYTD)}{mainOf(a) && <>　主な中身：{mainOf(a)}</>}</span></div>)}</div>}
+                    </MkSection>
+
+                    <MkSection title={`${mon}の気になる動き`} lead="急に増えた・初めて出た・毎月出ていたのに止まった項目です（最大5件）。">
+                        {moves.length === 0 ? <MkEmpty>目立った動きはありません</MkEmpty> : (
+                            <ul className="space-y-2">{moves.map((m, i) => <li key={i} className="rounded-xl border border-amber-200 bg-amber-50/60 px-4 py-3"><div className="text-sm font-bold text-amber-700">{m.title}</div><div className="text-base text-gray-800 mt-0.5">{m.detail}</div></li>)}</ul>
+                        )}
+                    </MkSection>
+
+                    <MkMore title="人件費と経費の内訳">
+                        <MkTable head={['区分', `${mon}`, `${mon}の予算`, '累計', '累計の予算', '累計の差', '通期の見込（直近3か月のペース）']} align={['l', 'r', 'r', 'r', 'r', 'r', 'r']}
+                            rows={[['人件費', totals.personnel], ['経費', totals.other], ['合計', T]].map(([n, t]) => ({ cls: n === '合計' ? 'bg-gray-50 font-bold' : '', cells: [n, XF.man(t.cur), XF.man(t.curBudget), XF.man(t.actualYTD), XF.man(t.budgetYTD), <span className={t.actualYTD - t.budgetYTD > 0 ? 'text-red-600' : 'text-emerald-600'}>{XF.manS(t.actualYTD - t.budgetYTD)}</span>, XF.man(t.forecastPace)] }))} />
+                    </MkMore>
+                    {under.length > 0 && <MkMore title="予算より少なく済んでいる科目">
+                        <MkTable head={['科目', '累計の実績', '累計の予算', '差']} align={['l', 'r', 'r', 'r']} rows={under.map(a => ({ cells: [a.name, XF.man(a.actualYTD), XF.man(a.budgetYTD), <b className="text-emerald-600">{XF.manS(a.diffYTD)}</b>] }))} />
+                    </MkMore>}
+                    {dataIssues.length > 0 && <MkMore title={`データの不整合 ${dataIssues.length}件（経理での確認用）`}>
+                        <ul className="space-y-2">{dataIssues.slice(0, 10).map((m, i) => <li key={i} className="text-sm text-gray-700"><b className="text-red-600">{m.title}</b>：{m.detail}</li>)}</ul>
+                    </MkMore>}
+                    <div className="flex flex-col sm:flex-row justify-between items-start gap-3">
+                        <button onClick={onOpenDetail} className="px-6 py-3 rounded-xl bg-white border border-gray-300 text-gray-700 text-base font-bold hover:bg-gray-50">すべての科目・項目を見る（販管費の詳細）</button>
+                        <MkNext id="mk_exp" onGo={onGo} />
+                    </div>
+                </div>
+            );
+        }
+
+        const navItems = [{ id: 'division', label: '事業部', icon: 'Layout' }, { id: 'expenses', label: '販管費（詳細）', icon: 'CreditCard' }, { id: 'projects', label: '案件リスト', icon: 'Briefcase' }, { id: 'weekly', label: '週次', icon: 'Calendar' }, { id: 'forecast', label: '見込', icon: 'TrendingUp' }, { id: 'works', label: '作品', icon: 'Film' }, { id: 'clients', label: '顧客', icon: 'Users' }, { id: 'jobs', label: '職種', icon: 'BarChart' }, { id: 'dashboard', label: '全社（一覧）', icon: 'Dashboard' }, { id: 'history', label: '過去実績', icon: 'History' }, { id: 'report', label: '出力', icon: 'FileText' }];
+        const MK_RELATED = { mk_month: ['division', 'projects', 'weekly'], mk_outlook: ['forecast', 'division', 'history'], mk_works: ['works', 'projects', 'clients'], mk_exp: ['expenses', 'division'] };
 
         const MONTH_LABELS = ['3月','4月','5月','6月','7月','8月','9月','10月','11月','12月','1月','2月'];
 
@@ -4498,7 +5151,7 @@
         };
 
         const CHAT = {
-            TAB_LABELS: { dashboard: '全社', weekly: '週次', forecast: '見込', division: '事業部', clients: '顧客', works: '作品', jobs: '職種', expenses: '販管費', projects: '案件管理', history: '過去実績', report: '出力' },
+            TAB_LABELS: { mk_month: '①今月の粗利', mk_outlook: '②年間の見通し', mk_works: '③注目の作品・案件', mk_exp: '④販管費', dashboard: '全社', weekly: '週次', forecast: '見込', division: '事業部', clients: '顧客', works: '作品', jobs: '職種', expenses: '販管費', projects: '案件管理', history: '過去実績', report: '出力' },
             SUGGESTIONS: {
                 dashboard: ['今期の粗利は予算に対してどう？遅れている月と原因は？', '前年と比べて伸びている顧客・落ちている顧客は？'],
                 division: ['事業部ごとの予算達成率と、足を引っ張っている案件は？', '第2事業部の粗利率が前年と比べてどう変わったか教えて'],
@@ -4668,7 +5321,12 @@
         }
 
         function App() {
-            const [activeTab, setActiveTab] = useState('dashboard');
+            const [activeTab, setActiveTab] = useState('mk_month');
+            const [mkView, setMkViewState] = useState(() => { try { return localStorage.getItem('gaie_mk_view') || 'chart'; } catch (e) { return 'chart'; } });
+            const setMkView = (v) => { setMkViewState(v); try { localStorage.setItem('gaie_mk_view', v); } catch (e) {} };
+            const [mkBaseDays, setMkBaseDays] = useState(7);
+            const [showMore, setShowMore] = useState(false);
+            const goTab = (id) => { setActiveTab(id); setShowMore(false); const m = document.querySelector('main'); if (m) m.scrollTo({ top: 0 }); window.scrollTo(0, 0); };
             const [displayMode, setDisplayMode] = useState('profit');
             const [monthlyViewMode, setMonthlyViewMode] = useState('chart');
             const [monthlyData, setMonthlyData] = useState({ labels: MONTH_LABELS, budget: [], budgetProfit: [], actual: [], actualProfit: [], lastYear: [], lastYearProfit: [], expenses: [], expensesBudget: [], operatingProfit: [], operatingProfitBudget: [] });
@@ -5022,12 +5680,20 @@
             const calculateRankedClients = useCallback((list) => { const agg = {}; (list||[]).forEach(p => { const k = p.client || '不明'; if(!agg[k]) agg[k] = { sales: 0, profit: 0 }; agg[k].sales += p.sales; agg[k].profit += p.profit; }); return Object.entries(agg).map(([name, d]) => ({ name, ...d, margin: d.sales > 0 ? (d.profit / d.sales * 100) : 0 })).sort((a,b) => b.profit - a.profit).slice(0, 10); }, []);
 
 
+            const mkBigCount = useMemo(() => { const t = MK.baseDate(mkBaseDays).getTime(); return (projectList || []).filter(p => MK.isFresh(p, t) && (p.profit || 0) >= 1000000).length; }, [projectList, mkBaseDays]);
             const hardErrors = loadErrors.filter(e => !e.optional);
             const softErrors = loadErrors.filter(e => e.optional);
 
             return (
                 <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-gray-800" onDragOver={(e)=>{e.preventDefault();setIsDragging(true);}} onDragLeave={(e)=>{if(e.currentTarget===e.target)setIsDragging(false);}} onDrop={handleDrop}>
-                    <header className="sticky top-0 z-50 bg-white border-b border-gray-200 shadow-sm h-14"><div className="max-w-7xl mx-auto w-full h-full px-4 sm:px-8 flex items-center justify-between"><div className="flex items-center gap-3 flex-shrink-0 mr-4"><div className="bg-blue-600 text-white p-1.5 rounded-lg shadow-sm"><Icon name="Activity" size={18} /></div><h1 className="text-base font-bold text-gray-800 tracking-tight hidden sm:block">Gaie Sales Dashboard</h1><span className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-bold whitespace-nowrap">経営陣版</span></div><nav className="flex-1 flex items-center gap-2 overflow-x-auto no-scrollbar h-full py-2">{navItems.map(item => (<button key={item.id} onClick={() => setActiveTab(item.id)} className={`${CLS.NAV_BTN} ${activeTab===item.id?CLS.NAV_BTN_ACTIVE:CLS.NAV_BTN_INACTIVE}`}><Icon name={item.icon} size={14} />{item.label}</button>))}</nav><div className="flex items-center gap-2 flex-shrink-0 ml-4 border-l border-gray-100 pl-4 h-8"><span className="hidden lg:block text-[10px] leading-tight text-right whitespace-nowrap">{isLoading ? <span className="text-blue-600 font-bold">同期中...</span> : (hardErrors.length > 0 ? <span className="text-amber-600 font-bold">データ一部欠損</span> : (lastSyncAt ? <span className="text-gray-400">最終同期 {lastSyncAt.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span> : <span className="text-gray-400">未同期</span>))}{historySyncing && <><br/><span className="text-gray-400">過去期を取得中...</span></>}</span><button onClick={()=>fetchFromSpreadsheet()} disabled={isLoading} className="flex items-center gap-1.5 text-xs font-bold text-gray-600 hover:text-blue-600 bg-gray-50 hover:bg-blue-50 px-3 py-1.5 rounded-lg border border-gray-200 disabled:opacity-40"><Icon name="Cloud" size={14} />更新</button><button onClick={()=>setShowSettings(true)} className="relative flex items-center gap-1.5 text-xs font-bold text-gray-600 hover:text-blue-600 bg-gray-50 hover:bg-blue-50 px-3 py-1.5 rounded-lg border border-gray-200"><Icon name="Settings" size={14} />連携{hardErrors.length > 0 && <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-amber-500 border border-white"></span>}</button></div></div></header>
+                    <header className="sticky top-0 z-50 bg-white border-b border-gray-200 shadow-sm"><div className="h-12 border-b border-gray-100"><div className="max-w-7xl mx-auto w-full h-full px-4 sm:px-8 flex items-center justify-between"><div className="flex items-center gap-3 flex-shrink-0 mr-4"><div className="bg-blue-600 text-white p-1.5 rounded-lg shadow-sm"><Icon name="Activity" size={18} /></div><h1 className="text-base font-bold text-gray-800 tracking-tight hidden sm:block">Gaie Sales Dashboard</h1><span className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-bold whitespace-nowrap">経営陣版</span></div><div className="flex-1"></div><div className="flex items-center gap-2 flex-shrink-0 ml-4 border-l border-gray-100 pl-4 h-8"><span className="hidden lg:block text-[10px] leading-tight text-right whitespace-nowrap">{isLoading ? <span className="text-blue-600 font-bold">同期中...</span> : (hardErrors.length > 0 ? <span className="text-amber-600 font-bold">データ一部欠損</span> : (lastSyncAt ? <span className="text-gray-400">最終同期 {lastSyncAt.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span> : <span className="text-gray-400">未同期</span>))}{historySyncing && <><br/><span className="text-gray-400">過去期を取得中...</span></>}</span><button onClick={()=>fetchFromSpreadsheet()} disabled={isLoading} className="flex items-center gap-1.5 text-xs font-bold text-gray-600 hover:text-blue-600 bg-gray-50 hover:bg-blue-50 px-3 py-1.5 rounded-lg border border-gray-200 disabled:opacity-40"><Icon name="Cloud" size={14} />更新</button><button onClick={()=>setShowSettings(true)} className="relative flex items-center gap-1.5 text-xs font-bold text-gray-600 hover:text-blue-600 bg-gray-50 hover:bg-blue-50 px-3 py-1.5 rounded-lg border border-gray-200"><Icon name="Settings" size={14} />連携{hardErrors.length > 0 && <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-amber-500 border border-white"></span>}</button></div></div></div><div className="max-w-7xl mx-auto w-full px-4 sm:px-8 py-2 flex items-center gap-2">
+                        <span className="hidden md:block text-xs font-bold text-gray-400 mr-1 whitespace-nowrap">毎週見る</span>
+                        <nav className="flex-1 flex items-center gap-2 overflow-x-auto no-scrollbar">{MK.PAGES.map(pg => { const on = activeTab === pg.id; return (<button key={pg.id} onClick={() => goTab(pg.id)} className={`relative flex items-center gap-2 px-4 py-2 rounded-xl text-base font-bold whitespace-nowrap border transition-colors ${on ? 'bg-blue-600 text-white border-blue-700 shadow-md' : 'bg-white text-gray-700 border-gray-300 hover:bg-blue-50'}`}><span className={`w-6 h-6 rounded-full text-sm flex items-center justify-center ${on ? 'bg-white text-blue-700' : 'bg-blue-100 text-blue-700'}`}>{pg.n}</span>{pg.label}{pg.id === 'mk_works' && mkBigCount > 0 && <span className="absolute -top-2 -right-2 min-w-[22px] h-[22px] px-1 rounded-full bg-orange-500 text-white text-xs flex items-center justify-center border-2 border-white">{mkBigCount}</span>}</button>); })}</nav>
+                    </div>
+                    <div className="max-w-7xl mx-auto w-full px-4 sm:px-8 pb-2 flex items-start gap-2">
+                        <span className="hidden md:block text-xs font-bold text-gray-400 mr-1 whitespace-nowrap pt-1.5">詳しく見る</span>
+                        <nav className="flex-1 flex flex-wrap items-center gap-1.5">{navItems.map(item => { const on = activeTab === item.id; return (<button key={item.id} onClick={() => goTab(item.id)} className={`flex items-center gap-1 px-3 py-1 rounded-lg text-sm whitespace-nowrap border transition-colors ${on ? 'bg-slate-700 text-white border-slate-800 font-bold' : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-blue-50 hover:text-blue-700'}`}><Icon name={item.icon} size={13} />{item.label}</button>); })}</nav>
+                    </div></header>
                     <main className="flex-1 overflow-y-auto p-4 max-w-7xl mx-auto w-full">
                          {isLoading && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-sm"><div className="bg-white p-8 rounded-2xl shadow-2xl flex flex-col items-center max-w-sm w-full relative overflow-hidden"><div className="mb-6 relative flex items-center justify-center h-20 w-20"><div className="absolute inset-0 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin"></div><div className="relative bg-white p-4 rounded-full shadow-sm text-blue-600"><Icon name="TrendingUp" size={32} /></div></div><h3 className="text-lg font-bold text-gray-800 mb-2">データを同期中</h3><p className="text-xs text-gray-500 mb-1">{loadingStatus}</p></div></div>}
                          {!isLoading && hardErrors.length > 0 && (
@@ -5051,6 +5717,10 @@
                              </div>
                          )}
                          <ErrorBoundary>
+                             {activeTab === 'mk_month' && <MkMonthPage monthlyData={monthlyData} projectList={projectList} lastYearProjectList={lastYearProjectList} divisionMonthlyData={divisionMonthlyData} worksMaster={worksMaster} currentPeriod={currentPeriod} view={mkView} setView={setMkView} baseDays={mkBaseDays} setBaseDays={setMkBaseDays} onGo={goTab} />}
+                             {activeTab === 'mk_outlook' && <MkOutlookPage monthlyData={monthlyData} divisionMonthlyData={divisionMonthlyData} execPL={execPL} execItems={execItems} currentPeriod={currentPeriod} view={mkView} setView={setMkView} onGo={goTab} />}
+                             {activeTab === 'mk_works' && <MkWorksPage projectList={projectList} worksMaster={worksMaster} view={mkView} setView={setMkView} baseDays={mkBaseDays} setBaseDays={setMkBaseDays} onGo={goTab} />}
+                             {activeTab === 'mk_exp' && <MkExpensePage execPL={execPL} execItems={execItems} monthlyData={monthlyData} view={mkView} setView={setMkView} onGo={goTab} onOpenDetail={() => goTab('expenses')} onOpenSettings={() => setShowSettings(true)} />}
                              {activeTab === 'dashboard' && <DashboardPage monthlyData={monthlyData} projectList={projectList} worksMaster={worksMaster} divisionMonthlyData={divisionMonthlyData} divisionData={divisionData} displayMode={displayMode} setDisplayMode={setDisplayMode} opMode={opMode} setOpMode={setOpMode} monthlyViewMode={monthlyViewMode} setMonthlyViewMode={setMonthlyViewMode} opViewMode={opViewMode} setOpViewMode={setOpViewMode} expenseViewMode={expenseViewMode} setExpenseViewMode={setExpenseViewMode} calculateRankedProjects={calculateRankedProjects} calculateRankedClients={calculateRankedClients} />}
                              {activeTab === 'weekly' && <WeeklySummaryPage projectList={projectList} worksMaster={worksMaster} releaseSchedule={releaseSchedule} currentPeriod={currentPeriod} />}
                              {activeTab === 'forecast' && <ForecastPage allWorks={allWorks} releaseSchedule={releaseSchedule} projectList={projectList} lastYearProjectList={lastYearProjectList} historicalData={historicalData} monthlyData={monthlyData} divisionMonthlyData={divisionMonthlyData} worksMaster={worksMaster} currentPeriod={currentPeriod} />}
